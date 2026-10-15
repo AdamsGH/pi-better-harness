@@ -30,8 +30,8 @@
     "access": "public"
   },
   "scripts": {
-    "pretest": "node ../../scripts/sync-shared-ssh-core.mjs",
-    "prepack": "node ../../scripts/sync-shared-ssh-core.mjs",
+    "pretest": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-ssh-core.mjs",
+    "prepack": "node ../../scripts/sync-shared-log-utils.mjs && node ../../scripts/sync-shared-ssh-core.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -44,9 +44,16 @@
   ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@howaboua/pi-codex-conversion": ">=3.0.24",
     "typebox": "*"
   },
+  "peerDependenciesMeta": {
+    "@howaboua/pi-codex-conversion": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@howaboua/pi-codex-conversion": "^3.0.52",
     "@types/node": "^25.0.0",
     "typebox": "^1.1.39",
     "typescript": "^6.0.0",
@@ -54,5 +61,8 @@
   },
   "engines": {
     "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "proper-lockfile": "^4.1.2"
   }
 }

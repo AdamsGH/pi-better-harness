@@ -28,6 +28,7 @@ const harnessSettingsTargets = [
   "packages/pi-better-subagents/shared-harness-settings.ts",
   "packages/pi-better-background-tasks/src/shared-harness-settings.ts",
   "packages/pi-better-goal/src/shared-harness-settings.ts",
+  "packages/pi-better-ssh/src/shared-harness-settings.ts",
   "packages/pi-better-sandbox/shared-harness-settings.ts",
   "packages/pi-better-harness/extensions/shared-harness-settings.ts",
 ];

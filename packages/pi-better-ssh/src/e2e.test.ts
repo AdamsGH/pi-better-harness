@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { failedResult, FakeRemoteRunner, successfulResult } from "../../ssh-core/test-support/index.js";
 import sshExtension, { registerRemoteBashTool, registerSshExtension } from "./index.js";
@@ -44,9 +45,19 @@ type RegisteredTool = {
 // @covers pi-better-ssh.tool-contract
 // @level integration
 describe("pi-better-ssh extension", () => {
-  it("registers explicit SSH tools without overriding local bash", () => {
+  let agentDir: string;
+  beforeEach(() => {
+    agentDir = mkdtempSync(join(tmpdir(), "pi-ssh-settings-"));
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(agentDir, { recursive: true, force: true });
+  });
+
+  it("registers explicit SSH tools without overriding local bash", async () => {
     const harness = createHarness();
-    sshExtension(harness.pi);
+    await sshExtension(harness.pi);
 
     expect([...harness.tools.keys()]).toEqual(["remote_bash", "ssh_profile", "ssh_mux"]);
     expect(harness.tools.has("bash")).toBe(false);
@@ -73,6 +84,40 @@ describe("pi-better-ssh extension", () => {
     expect(tool.promptGuidelines?.join(" ")).toContain("bg_task_spawn");
     expect(tool.parameters?.properties?.host?.description).toContain("Host alias or user@host");
     expect(tool.parameters?.properties?.options?.description).toContain("cannot disable");
+    expect(codeModeTools(harness.pi)).toEqual([]);
+  });
+
+  it.each([{}, { promoteCodeModeTools: false }, { promoteCodeModeTools: true }])(
+    "only promotes Code Mode tools when explicitly enabled: %j", async (ssh) => {
+      const settings = JSON.stringify({ piBetterHarness: { ssh }, unrelated: "preserve" });
+      const path = join(agentDir, "settings.json");
+      writeFileSync(path, settings);
+      const harness = createHarness();
+      await sshExtension(harness.pi);
+
+      expect([...harness.tools.keys()]).toEqual(["remote_bash", "ssh_profile", "ssh_mux"]);
+      expect(codeModeTools(harness.pi).map((entry) => [entry.name, entry.deferLoading]))
+        .toEqual("promoteCodeModeTools" in ssh && ssh.promoteCodeModeTools
+          ? [["remote_bash", false], ["ssh_profile", false], ["ssh_mux", false]] : []);
+      expect(readFileSync(path, "utf8")).toBe(settings);
+    },
+  );
+
+  it.each([null, [], "true", { promoteCodeModeTools: "true" }, { promoteCodeModeTools: null }])(
+    "rejects invalid SSH preferences instead of enabling promotion: %j", async (ssh) => {
+      writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ piBetterHarness: { ssh } }));
+      const harness = createHarness();
+      await expect(sshExtension(harness.pi)).rejects.toThrow("boolean promoteCodeModeTools");
+      expect(harness.tools.size).toBe(0);
+      expect(codeModeTools(harness.pi)).toEqual([]);
+    },
+  );
+
+  it("reports malformed settings without overwriting them", async () => {
+    const path = join(agentDir, "settings.json");
+    writeFileSync(path, "{");
+    await expect(sshExtension(createHarness().pi)).rejects.toThrow(SyntaxError);
+    expect(readFileSync(path, "utf8")).toBe("{");
   });
 
   it("lists SSH config aliases and persists profile use/status/clear across reload", async () => {
@@ -307,10 +352,11 @@ describe("pi-better-ssh extension", () => {
 
   // @covers pi-better-ssh.release-contract
   // @level integration
-  it("loads the independently packed extension registered in the root bundle", () => {
+  it("loads the independently packed extension without the optional Code Mode adapter", () => {
     const directory = mkdtempSync(join(tmpdir(), "pi-ssh-pack-"));
     const packageRoot = fileURLToPath(new URL("../", import.meta.url));
     const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ piBetterHarness: { ssh: { promoteCodeModeTools: true } } }));
     try {
       const packOutput = JSON.parse(execFileSync(process.execPath, [process.env.npm_execpath!,
         "pack", "--ignore-scripts", "--json", "--pack-destination", directory,
@@ -326,12 +372,16 @@ describe("pi-better-ssh extension", () => {
       expect(manifest.pi.extensions).toHaveLength(1);
       expect(rootManifest.pi.extensions.map((entry: string) => resolve(repoRoot, entry)))
         .toContain(resolve(packageRoot, manifest.pi.extensions[0]));
-      symlinkSync(join(repoRoot, "node_modules"), join(directory, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+      for (const name of ["@earendil-works/pi-coding-agent", "typebox", "tsx", "proper-lockfile"]) {
+        const target = join(directory, "node_modules", name);
+        mkdirSync(dirname(target), { recursive: true });
+        symlinkSync(join(repoRoot, "node_modules", name), target, process.platform === "win32" ? "junction" : "dir");
+      }
       const output = execFileSync(process.execPath, [
         "--import", "tsx", "--input-type=module", "-e",
         `import extension from ${JSON.stringify(pathToFileURL(join(directory, "package", manifest.pi.extensions[0])).href)};
          const tools = [];
-         extension({ registerTool(tool) { tools.push(tool.name); }, on() {} });
+         await extension({ registerTool(tool) { tools.push(tool.name); }, on() {}, events: { on() {}, emit() {} } });
          console.log(JSON.stringify(tools));`,
       ], { cwd: directory, encoding: "utf8" });
       expect(JSON.parse(output)).toEqual(["remote_bash", "ssh_profile", "ssh_mux"]);
@@ -341,7 +391,19 @@ describe("pi-better-ssh extension", () => {
   }, 20_000);
 });
 
+function codeModeTools(pi: ExtensionAPI) {
+  const providers: Array<() => Array<{ name: string; deferLoading: boolean }>> = [];
+  pi.events.emit("@howaboua/pi-codex-conversion.extension-code-mode-tools/v1", {
+    refreshGates: false,
+    add(provider: typeof providers[number], active: boolean) {
+      if (active) providers.push(provider);
+    },
+  });
+  return providers.flatMap((provider) => provider());
+}
+
 function createHarness(sessionId = "session-216", entries: SessionEntry[] = []) {
+  const events = new EventEmitter();
   const tools = new Map<string, RegisteredTool>();
   const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
   const statuses: Array<[string, string | undefined]> = [];
@@ -360,6 +422,13 @@ function createHarness(sessionId = "session-216", entries: SessionEntry[] = []) 
     },
   };
   const pi = {
+    events: {
+      on(name: string, handler: (...args: any[]) => void) {
+        events.on(name, handler);
+        return () => events.off(name, handler);
+      },
+      emit(name: string, value: unknown) { events.emit(name, value); },
+    },
     appendEntry(customType: string, data: unknown) {
       entries.push({ type: "custom", customType, data });
     },

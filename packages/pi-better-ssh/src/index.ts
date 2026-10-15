@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+  defineTool,
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
@@ -8,6 +9,7 @@ import { Type } from "typebox";
 import { createSshMuxRegistry } from "./mux-registry.js";
 import type { SshMuxEntryMap, SshMuxRegistry } from "./mux-registry.js";
 import { createProcessRemoteRunner } from "./process-runner.js";
+import { readSshPreferences } from "./preferences.js";
 import {
   createSshProfile,
   formatSshProfileChip,
@@ -72,8 +74,8 @@ export interface RegisterSshExtensionDependencies extends RegisterRemoteBashDepe
   muxEntries?: SshMuxEntryMap;
 }
 
-export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterRemoteBashDependencies): void {
-  pi.registerTool({
+export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterRemoteBashDependencies) {
+  const tool = defineTool({
     name: "remote_bash",
     label: "Remote Bash",
     description: `Run one short remote bash command synchronously over SSH. Reuses a ControlMaster on Linux/macOS; uses independent connections on Windows. Pass an SSH Host alias or user@host, or omit host when an active SSH profile supplies it; optional workdir, env, timeout, and structured identity fields are supported. Required SSH safety options cannot be disabled. Returns remote output and exitCode without turning a non-zero remote exit into a tool failure. Output is truncated to the last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first), with full output saved locally. For long-running remote work, use bg_task_spawn (or bg_task_* lifecycle tools) with structured ssh instead. Pi's built-in bash remains local.`,
@@ -100,9 +102,11 @@ export function registerRemoteBashTool(pi: ExtensionAPI, dependencies: RegisterR
       };
     },
   });
+  pi.registerTool(tool);
+  return tool;
 }
 
-export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSshExtensionDependencies): void {
+export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSshExtensionDependencies) {
   let activeProfile: SshProfile | undefined;
   const muxRegistry = dependencies.muxRegistry ?? createSshMuxRegistry({
     runner: dependencies.runner,
@@ -110,7 +114,7 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
     ...(dependencies.muxEntries ? { entries: dependencies.muxEntries } : {}),
   });
 
-  registerRemoteBashTool(pi, {
+  const remoteBash = registerRemoteBashTool(pi, {
     ...dependencies,
     muxRegistry,
     getActiveProfile: () => activeProfile,
@@ -176,7 +180,7 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
     return mux;
   };
 
-  pi.registerTool({
+  const sshProfile = defineTool({
     name: "ssh_profile",
     label: "SSH Profile",
     description: "List SSH config Host aliases and manage the active session default host, workdir, and environment. Profile state is stored in the Pi session and survives /reload; it does not create a separate host inventory.",
@@ -218,7 +222,9 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
     },
   });
 
-  pi.registerTool({
+  pi.registerTool(sshProfile);
+
+  const sshMux = defineTool({
     name: "ssh_mux",
     label: "SSH Mux",
     description: "Inspect or stop the SSH ControlMaster for one target, the active profile, or all masters observed in this Pi process for the current session.",
@@ -260,6 +266,7 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
       return { content: [{ type: "text" as const, text: formatMuxResults(masters) }], details };
     },
   });
+  pi.registerTool(sshMux);
 
   const restore = async (ctx: ExtensionContext): Promise<void> => {
     activeProfile = restoreSshProfile(ctx.sessionManager.getBranch());
@@ -268,10 +275,33 @@ export function registerSshExtension(pi: ExtensionAPI, dependencies: RegisterSsh
   pi.on("session_start", async (_event, ctx) => restore(ctx));
   pi.on("session_tree", async (_event, ctx) => restore(ctx));
   pi.on("session_shutdown", async (_event, ctx) => setFooter(ctx, undefined));
+  return { remoteBash, sshProfile, sshMux };
 }
 
-export default function sshExtension(pi: ExtensionAPI): void {
-  registerSshExtension(pi, { runner: createProcessRemoteRunner() });
+export default async function sshExtension(pi: ExtensionAPI): Promise<void> {
+  const preferences = readSshPreferences();
+  const tools = registerSshExtension(pi, { runner: createProcessRemoteRunner() });
+  if (!preferences.promoteCodeModeTools) return;
+  let codeMode: typeof import("@howaboua/pi-codex-conversion/code-mode");
+  try {
+    codeMode = await import("@howaboua/pi-codex-conversion/code-mode");
+  } catch (error) {
+    if (["ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND"].includes((error as NodeJS.ErrnoException).code ?? "")
+      && /Cannot find (?:package|module) ['"]@howaboua\/pi-codex-conversion(?:\/code-mode)?['"]/.test((error as Error).message)) return;
+    throw error;
+  }
+  const { adaptToolForCodeMode, registerCodeModeExtensionTools } = codeMode;
+  registerCodeModeExtensionTools(pi, () => [
+    adaptToolForCodeMode(tools.remoteBash, {
+      usage: 'await tools.remote_bash({ command: "hostname", host: "ssh-alias", timeout: 30 })',
+    }),
+    adaptToolForCodeMode(tools.sshProfile, {
+      usage: 'await tools.ssh_profile({ action: "list" })',
+    }),
+    adaptToolForCodeMode(tools.sshMux, {
+      usage: 'await tools.ssh_mux({ action: "status", host: "ssh-alias" })',
+    }),
+  ]);
 }
 
 function formatProfileList(aliases: string[], active: SshProfile | undefined): string {

@@ -46,6 +46,22 @@ Use `remote_bash` when the foreground turn should wait for a short remote comman
 | `ssh_profile` | List SSH aliases or manage the active session's host, workdir, and environment defaults. |
 | `ssh_mux` | Inspect or stop reusable ControlMaster connections. |
 
+Tool visibility follows Pi and the active adapter's defaults. No Code Mode promotion is applied by default.
+
+To list all three SSH tools without deferred discovery in Pi Codex Conversion 3.0.24 or newer, merge this setting into `~/.pi/agent/settings.json` (or the agent directory selected by `PI_CODING_AGENT_DIR`), then run `/reload`:
+
+```json
+{
+  "piBetterHarness": {
+    "ssh": {
+      "promoteCodeModeTools": true
+    }
+  }
+}
+```
+
+`promoteCodeModeTools` defaults to `false`. It only controls the optional Pi Codex Conversion integration; it does not change native Pi `codemode` exposure or its declaration budget. Without the adapter, SSH tools still register normally, even when the setting is enabled.
+
 ## SSH Hosts
 
 Prefer a literal `Host` alias in `~/.ssh/config`; OpenSSH applies its configured hostname, user, port, key, jump host, and other policy. Wildcard entries are honored by OpenSSH but are not listed by `ssh_profile`.
